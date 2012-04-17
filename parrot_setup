@@ -1,0 +1,114 @@
+#!/bin/bash -x
+
+glidein_config="$1"
+
+function warn {
+ echo `date` parrot_setup: $@ 1>&2
+}
+
+function die {
+ warn ERROR: "$@"
+ exit 1
+}
+
+###########################################################
+# import add_config_line and add_condor_vars_line functions
+
+add_config_line_source=`grep '^ADD_CONFIG_LINE_SOURCE ' $glidein_config | awk '{print $2}'`
+source $add_config_line_source
+
+condor_vars_file=`grep -i "^CONDOR_VARS_FILE " $glidein_config | awk '{print $2}'`
+
+GLIDEIN_PARROT=`grep -i "^GLIDECLIENT_GLIDEIN_PARROT " $glidein_config | awk '{print $2}'`
+if ! [ -z "$GLIDEIN_PARROT" ]; then
+  # untar location GLIDECLIENT_GLIDEIN_PARROT is directory containing untarred files
+  # point GLIDEIN_PARROT inside the directory contained within the tar file:
+  GLIDEIN_PARROT="$GLIDEIN_PARROT/parrot"
+fi
+
+# put GLIDEIN_PARROT in job environment so cvmfs_job_wrapper can find it
+add_config_line GLIDEIN_PARROT "$GLIDEIN_PARROT"
+add_condor_vars_line GLIDEIN_PARROT "S" "-" "+" "Y" "N" "+"
+
+# configure CVMFS
+
+# load balance across central proxies, if we use them
+central_cvmfs_proxies="http://cache01.hep.wisc.edu:80|http://cache02.hep.wisc.edu:80"
+
+site_proxy=`grep -i "^PROXY_URL " $glidein_config | awk '{print $2}'`
+if [ "$site_proxy" = "None" ]; then
+  site_proxy=""
+fi
+if [ "$site_proxy" != "" ]; then
+  # only fail-over to central proxies if site proxy fails
+  cvmfs_proxies="proxies=$site_proxy;$central_cvmfs_proxies"
+else
+  # no site proxy
+  cvmfs_proxies="proxies=$central_cvmfs_proxies"
+fi
+
+# Prevent the cvmfs cache from becoming unreasonably large.
+# NOTE: this limits maximum size of file that can be read to quota_limit-quota_threshold=2GB
+cvmfs_quota=quota_limit=4000,quota_threshold=2000
+
+# Currently, I am disabling the default cvmfs repositories
+# (e.g. cms.cern.ch), because I am concerned that jobs may test for
+# existence of these repositories, find them, and then fail because
+# they are not fully supported.  (For example, for cms.cern.ch to
+# work, the CMS SITECONF would need to be set up.)
+#PARROT_CVMFS_REPO="<default-repositories>:${cvmfs_proxies},${cvmfs_quota} "
+
+export PARROT_CVMFS_REPO="${PARROT_CVMFS_REPO}cms.hep.wisc.edu:pubkey=$GLIDEIN_PARROT/cms.hep.wisc.edu.pub,${cvmfs_proxies},${cvmfs_quota},url=http://cvmfs01.hep.wisc.edu/cvmfs/cms.hep.wisc.edu;http://cvmfs03.hep.wisc.edu/cvmfs/cms.hep.wisc.edu"
+
+add_config_line PARROT_CVMFS_REPO "$PARROT_CVMFS_REPO"
+#The following does not work as of 2012-03-20, because the ';' in PARROT_CVMFS_REPO
+#causes an invalid configuration of STARTER_JOB_ENVIRONMENT
+#add_condor_vars_line PARROT_CVMFS_REPO "S" "-" "+" "Y" "N" "+"
+
+#workaround for the above problem:
+echo "export PARROT_CVMFS_REPO=\"${PARROT_CVMFS_REPO}\"" > $GLIDEIN_PARROT/setup.sh \
+  || die "failed to create parrot/setup.sh"
+
+# Initialize default CVMFS_OSG_APP here, but allow the frontend to override.
+CVMFS_OSG_APP=`grep -i "^CVMFS_OSG_APP " $glidein_config | awk '{print $2}'`
+if [ "$CVMFS_OSG_APP" = "" ]; then
+  CVMFS_OSG_APP=/cvmfs/cms.hep.wisc.edu/osg/app
+  add_config_line CVMFS_OSG_APP $CVMFS_OSG_APP
+fi
+add_condor_vars_line CVMFS_OSG_APP "S" "-" "+" "N" "N" "+"
+
+
+# The GLIDEIN_PARROT_OPTIONS environment variable will be used to pass
+# additional options to parrot.  The default is empty, so this has no
+# effect unless the value is modified by some other script.
+add_condor_vars_line GLIDEIN_PARROT_OPTIONS "S" "-" "+" "N" "N" "+"
+
+
+parrot_tmp="${GLIDEIN_PARROT}/tmp1"
+if "$GLIDEIN_PARROT/parrot_run" -t "$parrot_tmp" test -d $CVMFS_OSG_APP; then
+  /bin/true
+  # publish in the machine ad that this glidein supports parrot CVMFS
+  add_condor_vars_line HasParrotCVMFS "C" "True" "+" "N" "Y" "-"
+
+else
+  warn "test of parrot_run failed with exit status $?."
+
+  # do a simple wget test to see if that also fails
+  for http_proxy in `echo $cvmfs_proxies | tr ';|' ' '`; do
+    export http_proxy
+    warn "((((((((((((((((((((((((((("
+    warn "Testing access to cms.hep.wisc.edu via proxy $http_proxy"
+    wget -O /dev/null http://cvmfs01.hep.wisc.edu/cvmfs/cms.hep.wisc.edu/.cvmfspublished
+    if [ "$?" != "0" ]; then
+      warn "FAILURE: proxy $http_proxy did NOT succeed in wget test"
+    else
+      warn "proxy $http_proxy succeeded in wget test"
+    fi
+    warn ")))))))))))))))))))))))))))"
+  done
+
+  GlideinRequiresParrotCVMFS=`grep -i "^GlideinRequiresParrotCVMFS " $glidein_config | awk '{print $2}'`
+  if [ "$GlideinRequiresParrotCVMFS" != "" ] && [ "$GlideinRequiresParrotCVMFS" != "False" ]; then
+    die "aborting glidein setup, because parrot setup failed and was required"
+  fi
+fi
