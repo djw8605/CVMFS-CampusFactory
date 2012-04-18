@@ -77,7 +77,7 @@ export GLIDEIN_PARROT_OPTIONS=`grep -i "^GLIDEIN_PARROT_OPTIONS " $glidein_confi
       export LOCAL_OSG_APP="$OSG_APP"
       export OSG_APP="$CVMFS_OSG_APP"
     fi
-
+    source $OSG_APP/cmssoft/cms/cmsset_default.sh
     # As of parrot 3.4.0, parrot causes ssh_to_job to fail, so
     # avoid using parrot when _CONDOR_JOB_PIDS is non-empty.
     # (That's how we guess that this is an ssh_to_job session.)
