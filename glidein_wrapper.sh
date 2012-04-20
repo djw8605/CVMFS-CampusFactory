@@ -16,11 +16,16 @@ cd $local_dir
 cp $campus_factory_dir/glideinExec.tar.gz $local_dir
 cp $campus_factory_dir/passwdfile $local_dir
 cp $campus_factory_dir/parrot.tgz $local_dir
-tar xzf $local_dir/parrot.tgz
+#tar xzf $local_dir/parrot.tgz
+cp $campus_factory_dir/cms_siteconf.tgz $local_dir
+#tar xzf cms_siteconf.tgz
+
 cp $campus_factory_dir/add_config_line.source $local_dir
 export GLIDEIN_PARROT=$local_dir/parrot
 
 cp $campus_factory_dir/parrot_setup $local_dir
+cp $campus_factory_dir/parrot_cms_setup $local_dir
+cp $campus_factory_dir/libcrypto.so.6 $local_dir
 
 # Untar the executables
 tar xzf $campus_factory_dir/glideinExec.tar.gz
@@ -31,7 +36,7 @@ export _condor_LOCAL_DIR=$local_dir
 export _condor_SBIN=$local_dir/glideinExec
 export _condor_LIB=$local_dir/glideinExec
 
-export LD_LIBRARY_PATH=$_condor_LIB
+export LD_LIBRARY_PATH=$_condor_LIB:$local_dir
 
 if [ -e $campus_factory_dir/user_job_wrapper.sh ]
 then

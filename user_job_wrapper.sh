@@ -32,13 +32,14 @@ cat $glidein_config
 mkdir $TEST_DIR/parrot
 tar x -C $TEST_DIR/parrot -f `pwd`/../../parrot.tgz || die "Failed to extract parrot"
 
-#mkdir $TEST_DIR/cms_siteconf
-#tar x -C $TEST_DIR/cms_siteconf -f `pwd`/../cms_siteconf.tgz || die "Failed to extract cms_siteconf"
+mkdir $TEST_DIR/cms_siteconf
+tar x -C $TEST_DIR/cms_siteconf -f `pwd`/../../cms_siteconf.tgz || die "Failed to extract cms_siteconf"
 
 touch $TEST_DIR/condor_vars.lst
 
 ../../parrot_setup $TEST_DIR/glidein_config || die "parrot_setup failed"
-#./parrot_cms_setup $TEST_DIR/glidein_config || die "parrot_cms_setup failed"
+ls ../../
+../../parrot_cms_setup $TEST_DIR/glidein_config || die "parrot_cms_setup failed"
 
 
 #cd $TEST_DIR

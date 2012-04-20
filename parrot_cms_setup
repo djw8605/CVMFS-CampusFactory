@@ -1,0 +1,205 @@
+#!/bin/sh
+
+glidein_config="$1"
+
+function info {
+ echo `date` parrot_cms_setup: $@ 1>&2
+}
+
+function warn {
+ echo `date` parrot_cms_setup: $@ 1>&2
+}
+
+function die {
+ warn ERROR: "$@"
+ exit 1
+}
+
+function get_squid_version {
+   env http_proxy="$1" wget -qdO/dev/null --header="X-Frontier-Id: AAA opportunistic probe" "http://cmsfrontier.cern.ch:8000/FrontierProd/Frontier/type=frontier_request:1:DEFAULT&encoding=BLOBzip5&p1=eNorTs1JTS5RUM8vKMgvKinNyywuyUyOLyjKT0pVV0grys9VSClNzAEAIY0Oow__" 2>&1|grep ^Via: | sed "s|.*(squid/\([^(]*\))[ \r\n]*|\1|"
+}
+
+###########################################################
+# import add_config_line and add_condor_vars_line functions
+
+add_config_line_source=`grep '^ADD_CONFIG_LINE_SOURCE ' $glidein_config | awk '{print $2}'`
+source $add_config_line_source
+
+condor_vars_file=`grep -i "^CONDOR_VARS_FILE " $glidein_config | awk '{print $2}'`
+
+siteconf_dir=`grep -i "^GLIDECLIENT_GLIDEIN_CMS_SITECONF " $glidein_config | awk '{print $2}'`
+if [ -z "$siteconf_dir" ]; then
+  die "failed to find GLIDECLIENT_GLIDEIN_CMS_SITECONF in glidein_config"
+fi
+
+# GLIDECLIENT_GLIDEIN_CMS_SITECONF is a directory containing untarred
+# files.  Point siteconf_dir to the SITECONF directory contained
+# within the tar file:
+siteconf_dir="$siteconf_dir/SITECONF"
+
+if ! [ -d "$siteconf_dir" ]; then
+  die "failed to find directory $siteconf_dir"
+fi
+
+
+# Test to see if local SQUID proxy is suitable for CMS Frontier.
+# This procedure was recommeded by Dave Dykstra.  We require
+#   2.7.STABLE7 <= squid_version < 3
+# See https://twiki.cern.ch/twiki/bin/view/CMS/MyOwnSquid
+
+http_proxy=`grep -i "^PROXY_URL " $glidein_config | awk '{print $2}'`
+if [ "$http_proxy" = "None" ]; then
+  http_proxy=""
+fi
+if [ "$http_proxy" != "" ] && ! (echo "$http_proxy" | grep -q ^http://); then
+  http_proxy="http://$http_proxy"
+fi
+
+
+squid_compatible=0
+if [ "$http_proxy" != "" ]; then
+  squid_version=$(get_squid_version $http_proxy)
+
+  squid_major=$(echo "$squid_version" | awk -F. '{print $1}')
+  squid_minor=$(echo "$squid_version" | awk -F. '{print $2}')
+  squid_micro=$(echo "$squid_version" | awk -F. '{print $3}')
+
+  if [ "$squid_major" = 2 ]; then
+    if [ "$squid_minor" -gt 7 ]; then
+      squid_compatible=1
+    elif [ "$squid_minor" = 7 ] && (echo "$squid_micro" | grep -q "STABLE[0-9].*"); then
+      squid_stable_micro=$(echo "$squid_micro" | sed 's|STABLE\([0-9]*\).*|\1|')
+      if [ "$squid_stable_micro" -ge 7 ]; then
+        squid_compatible=1
+      fi
+    fi
+  fi
+
+  # publish the squid version (to aid debugging)
+  warn "SiteSquidVersion=$squid_version"
+  add_config_line SiteSquidVersion "$squid_version"
+  add_condor_vars_line SiteSquidVersion "S" "-" "+" "N" "Y" "-"
+fi
+
+warn "squid version: $squid_version, proxy $http_proxy (Frontier compatible: $squid_compatible)"
+
+# publish compatibility of the site squid (to aid debugging)
+if [ "$squid_compatible" = 1 ]; then
+  add_condor_vars_line CMSFrontierUsingSiteSquid "C" "True" "+" "N" "Y" "-"
+  add_condor_vars_line HasCMSFrontier "C" "True" "+" "N" "Y" "-"
+else
+  add_condor_vars_line CMSFrontierUsingSiteSquid "C" "False" "+" "N" "Y" "-"
+fi
+
+if [ "$squid_compatible" = 1 ]; then
+  # Edit site-local-config.xml.
+  # We change two things:
+  #  1. insert the local site squid server at the front of the proxy list
+  #  2. turn off proxy load-balancing, so we always try local proxy first
+  #     before falling back to our central proxies
+  #     (TODO: would like to load-balance across central proxies if we
+  #      fall back to them; perhaps shuffle the list now)
+  #  ASSUMPTION: the original site-local-config.xml contains the
+  #  directive <load balance="proxies"/>, and this comes BEFORE
+  #  the central proxies.
+
+  mv "$siteconf_dir/local/JobConfig/site-local-config.xml" \
+     "$siteconf_dir/local/JobConfig/site-local-config.xml.orig" \
+    || die "Failed to move site-local-config.xml"
+
+  sed < "$siteconf_dir/local/JobConfig/site-local-config.xml.orig" \
+      > "$siteconf_dir/local/JobConfig/site-local-config.xml" \
+      's|<load balance="proxies"/>|<proxy url="'"$http_proxy"'"/>|' \
+    || die "Failed to replace site-local-config.xml"
+fi
+
+if [ "$squid_compatible" != 1 ]; then
+  # We will have to use the central frontier proxies,
+  # so test to make sure they are accessible.
+
+  central_proxies=$(grep 'proxy url=' $siteconf_dir/local/JobConfig/site-local-config.xml | sed 's|.*"\(.*\)".*|\1|' )
+  proxy_ok=0
+  for http_proxy in $central_proxies; do
+     warn "testing central frontier proxy $http_proxy"
+     squid_version=$(get_squid_version $http_proxy)
+     if [ "$squid_version" = "" ]; then
+       warn "FAILED test of http proxy $http_proxy"
+     else
+       warn "succeeded in test of http proxy $http_proxy: $squid_version"
+       proxy_ok=1
+     fi
+  done
+  if [ "$proxy_ok" = 1 ]; then
+    add_condor_vars_line HasCMSFrontier "C" "True" "+" "N" "Y" "-"
+  else
+    GlideinRequiresCMSFrontier=`grep -i "^GlideinRequiresCMSFrontier " $glidein_config | awk '{print $2}'`
+    if [ "$GlideinRequiresCMSFrontier" != "" ] && [ "$GlideinRequiresCMSFrontier" != "False" ]; then
+      die "could not successfully use the site or central frontier proxies: $central_proxies"
+    else
+      warn "Frontier failed, but GlideinRequiresCMSFrontier is not True, so continuing anyway."
+    fi
+  fi
+fi
+
+CVMFS_OSG_APP=`grep -i "^CVMFS_OSG_APP " $glidein_config | awk '{print $2}'`
+if [ "$CVMFS_OSG_APP" = "" ]; then
+  die "CVMFS_OSG_APP is not defined"
+fi
+
+
+# append to GLIDEIN_PARROT_OPTIONS
+#   - Tell parrot to remap requests for SITECONF from cvmfs to the local SITECONF
+#     that ships with this glidein (and which we may have modified above).
+#   ASSUMPTION: the full path to SITECONF is $CVMFS_OSG_APP/cmssoft/cms/SITECONF
+
+#   Rather than making the above assumption, we would rather use the trick of
+#   setting an environment variable (CMS_LOCAL_SITE) that controls the symlink
+#   SITECONF/local.  However, parrot currently does not fully support symlinks
+#   in CVMFS that point outside of the CVMFS repository.
+
+parrot_options=`grep -i "^GLIDEIN_PARROT_OPTIONS " $glidein_config | awk '{$1=""; print $0}'`
+parrot_options="$parrot_options -M $CVMFS_OSG_APP/cmssoft/cms/SITECONF=$siteconf_dir"
+add_config_line GLIDEIN_PARROT_OPTIONS "${parrot_options}"
+
+
+# If we are running at a CMS site, fix up the site name in our
+# SITECONF to match the local site.
+site_config_xml="$OSG_APP/cmssoft/cms/SITECONF/local/JobConfig/site-local-config.xml"
+if [ -e "$site_config_xml" ]; then
+   # Extract site name from: <site name="HERE">
+   site_name=$( grep "<site name=" "$site_config_xml" | sed 's|.*<site name *= *"\([^"]*\)".*|\1|' | head -1 )
+
+   if [ "$site_name" != "" ]; then
+      info "Inserting site name=$site_name into site-local-config.xml"
+
+      mv "$siteconf_dir/local/JobConfig/site-local-config.xml" \
+         "$siteconf_dir/local/JobConfig/site-local-config.xml.orig" \
+       || die "Failed to move site-local-config.xml to insert site name"
+
+      sed < "$siteconf_dir/local/JobConfig/site-local-config.xml.orig" \
+          > "$siteconf_dir/local/JobConfig/site-local-config.xml" \
+          's|<site name="\([^"]*\)"|<site name="'"$site_name"'"|' \
+        || die "Failed to replace site-local-config.xml to insert site name"
+   fi
+fi
+
+# If we are running at a CMS site, fix up the xrootd source string
+# to match the local site.
+storage_xml="$OSG_APP/cmssoft/cms/SITECONF/local/PhEDEx/storage.xml"
+if [ -e "$storage_xml" ]; then
+   # Extract site name from: root://xrootd.unl.edu//store/$1?source=HERE
+   xrootd_source=$( grep "root://xrootd.unl.edu" "$storage_xml" | sed 's|.*source=\([^"^ ]*\)".*|\1|' | head -1 )
+
+   if [ "$xrootd_source" != "" ]; then
+      info "Inserting xrootd source=$xrootd_source into storage.xml"
+
+      mv "$siteconf_dir/local/PhEDEx/storage.xml" \
+         "$siteconf_dir/local/PhEDEx/storage.xml.orig" \
+       || die "Failed to move storage.xml to insert site name"
+
+      sed < "$siteconf_dir/local/PhEDEx/storage.xml.orig" \
+          > "$siteconf_dir/local/PhEDEx/storage.xml" \
+          's|\(root://xrootd.unl.edu.*source=\)\([^"^ ]*\)"|\1'"$xrootd_source"'"|' \
+        || die "Failed to replace storage.xml to insert site name"
+   fi
+fi
